@@ -21,11 +21,11 @@ const orderSchema = new mongoose.Schema(
       phone: { type: String },
     },
     items: [orderItemSchema],
-    totalAmount: { type: Number, required: true }, // in kobo (Paystack) or cents (PayPal)
+    totalAmount: { type: Number, required: true }, // in kobo
     currency: { type: String, default: 'NGN' },
     paymentMethod: {
       type: String,
-      enum: ['paystack', 'paypal'],
+      enum: ['paystack'],
       required: true,
     },
     paymentStatus: {
@@ -33,12 +33,7 @@ const orderSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'failed', 'refunded'],
       default: 'pending',
     },
-    // Paystack-specific
     paystackReference: String,
-    // PayPal-specific
-    paypalOrderId: String,
-    paypalCaptureId: String,
-
     deliveryNote: { type: String, default: '' },
   },
   { timestamps: true }

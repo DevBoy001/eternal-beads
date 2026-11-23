@@ -22,7 +22,6 @@ app.use(
   })
 );
 
-// Rate limiting — 100 requests per 15 min per IP
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -33,10 +32,9 @@ app.use(
 );
 
 /* ─── Body parsing ──────────────────────────────────────── */
-// Paystack webhook needs the raw body to verify the HMAC signature
+// Paystack webhook needs raw body for HMAC signature verification
 app.use('/api/payment/paystack/webhook', express.raw({ type: 'application/json' }));
 
-// Everything else gets JSON
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

@@ -2,24 +2,22 @@
  * Admin routes — /api/admin  (all require X-Admin-Key header)
  *
  * Products:
- *   GET    /api/admin/products          — list all products (including out-of-stock)
- *   POST   /api/admin/products          — create product (multipart/form-data with 'image' field)
- *   PUT    /api/admin/products/:id      — update product details (no image change)
- *   PUT    /api/admin/products/:id/image — replace product image
- *   DELETE /api/admin/products/:id      — delete product + Cloudinary image
- *   PATCH  /api/admin/products/:id/stock — toggle inStock
+ *   GET    /api/admin/products              — list all (incl. out-of-stock)
+ *   POST   /api/admin/products              — create (multipart/form-data with 'image')
+ *   PUT    /api/admin/products/:id          — update text fields
+ *   PUT    /api/admin/products/:id/image    — replace image
+ *   DELETE /api/admin/products/:id          — delete + remove Cloudinary image
+ *   PATCH  /api/admin/products/:id/stock    — toggle in_stock
  *
  * Orders:
- *   GET    /api/admin/orders            — list all orders
- *   GET    /api/admin/orders/:id        — single order detail
+ *   GET    /api/admin/orders                — list all orders
+ *   GET    /api/admin/orders/:id            — single order
  */
 const router = require('express').Router();
-const Product = require('../models/Product');
-const Order = require('../models/Order');
+const pool = require('../config/db');
 const adminAuth = require('../middleware/adminAuth');
 const { cloudinary, upload } = require('../config/cloudinary');
 
-// All admin routes are protected
 router.use(adminAuth);
 
 /* ─── PRODUCTS ─────────────────────────────────────────── */
@@ -27,10 +25,12 @@ router.use(adminAuth);
 // List all products
 router.get('/products', async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 }).lean();
-    res.json({ success: true, products });
+    const { rows } = await pool.query(
+      'SELECT * FROM products ORDER BY created_at DESC'
+    );
+    res.json({ success: true, products: rows });
   } catch (err) {
-    console.error(err);
+    console.error(err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -42,60 +42,76 @@ router.post('/products', upload.single('image'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Product image is required' });
     }
 
-    const { name, category, price, note, tag, inStock, featured } = req.body;
+    const { name, category, price, note = '', tag = '', inStock, featured } = req.body;
 
-    const product = await Product.create({
-      name,
-      category,
-      price: Number(price),
-      note,
-      tag,
-      inStock: inStock !== 'false',
-      featured: featured === 'true',
-      image: req.file.path,           // Cloudinary secure URL
-      imagePublicId: req.file.filename, // Cloudinary public_id
-    });
-
-    res.status(201).json({ success: true, product });
-  } catch (err) {
-    console.error('POST /admin/products error:', err);
-    // If mongoose validation error
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ success: false, message: err.message });
+    if (!name || !category || !price) {
+      return res.status(400).json({ success: false, message: 'name, category, and price are required' });
     }
+
+    const { rows } = await pool.query(
+      `INSERT INTO products
+         (name, category, price, note, image, image_public_id, tag, in_stock, featured)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *`,
+      [
+        name,
+        category,
+        Number(price),
+        note,
+        req.file.path,
+        req.file.filename,
+        tag,
+        inStock !== 'false',
+        featured === 'true',
+      ]
+    );
+
+    res.status(201).json({ success: true, product: rows[0] });
+  } catch (err) {
+    console.error('POST /admin/products error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// Update product details (text fields only — no image)
+// Update product text fields
 router.put('/products/:id', async (req, res) => {
   try {
     const { name, category, price, note, tag, inStock, featured } = req.body;
 
-    const updates = {};
-    if (name !== undefined) updates.name = name;
-    if (category !== undefined) updates.category = category;
-    if (price !== undefined) updates.price = Number(price);
-    if (note !== undefined) updates.note = note;
-    if (tag !== undefined) updates.tag = tag;
-    if (inStock !== undefined) updates.inStock = inStock !== 'false' && inStock !== false;
-    if (featured !== undefined) updates.featured = featured === 'true' || featured === true;
+    // Build dynamic SET clause
+    const fields = [];
+    const values = [];
 
-    const product = await Product.findByIdAndUpdate(
-      req.params.id,
-      { $set: updates },
-      { new: true, runValidators: true }
+    if (name !== undefined)     { values.push(name);              fields.push(`name = $${values.length}`); }
+    if (category !== undefined) { values.push(category);          fields.push(`category = $${values.length}`); }
+    if (price !== undefined)    { values.push(Number(price));     fields.push(`price = $${values.length}`); }
+    if (note !== undefined)     { values.push(note);              fields.push(`note = $${values.length}`); }
+    if (tag !== undefined)      { values.push(tag);               fields.push(`tag = $${values.length}`); }
+    if (inStock !== undefined)  {
+      values.push(inStock !== 'false' && inStock !== false);
+      fields.push(`in_stock = $${values.length}`);
+    }
+    if (featured !== undefined) {
+      values.push(featured === 'true' || featured === true);
+      fields.push(`featured = $${values.length}`);
+    }
+
+    if (!fields.length) {
+      return res.status(400).json({ success: false, message: 'No fields to update' });
+    }
+
+    values.push(req.params.id);
+    const { rows } = await pool.query(
+      `UPDATE products SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values
     );
 
-    if (!product) {
+    if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
-    res.json({ success: true, product });
+    res.json({ success: true, product: rows[0] });
   } catch (err) {
-    console.error('PUT /admin/products/:id error:', err);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ success: false, message: err.message });
-    }
+    console.error('PUT /admin/products/:id error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -107,23 +123,28 @@ router.put('/products/:id/image', upload.single('image'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'New image file is required' });
     }
 
-    const product = await Product.findById(req.params.id);
-    if (!product) {
+    // Get old image public id
+    const { rows: existing } = await pool.query(
+      'SELECT image_public_id FROM products WHERE id = $1',
+      [req.params.id]
+    );
+    if (!existing.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
 
-    // Delete old image from Cloudinary
-    if (product.imagePublicId) {
-      await cloudinary.uploader.destroy(product.imagePublicId).catch(() => {});
+    // Delete old Cloudinary image
+    if (existing[0].image_public_id) {
+      await cloudinary.uploader.destroy(existing[0].image_public_id).catch(() => {});
     }
 
-    product.image = req.file.path;
-    product.imagePublicId = req.file.filename;
-    await product.save();
+    const { rows } = await pool.query(
+      `UPDATE products SET image = $1, image_public_id = $2 WHERE id = $3 RETURNING *`,
+      [req.file.path, req.file.filename, req.params.id]
+    );
 
-    res.json({ success: true, product });
+    res.json({ success: true, product: rows[0] });
   } catch (err) {
-    console.error('PUT /admin/products/:id/image error:', err);
+    console.error('PUT /admin/products/:id/image error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -131,45 +152,47 @@ router.put('/products/:id/image', upload.single('image'), async (req, res) => {
 // Delete product
 router.delete('/products/:id', async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-    if (!product) {
+    const { rows } = await pool.query(
+      'DELETE FROM products WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+    if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
 
-    // Remove image from Cloudinary
-    if (product.imagePublicId) {
-      await cloudinary.uploader.destroy(product.imagePublicId).catch(() => {});
+    // Remove from Cloudinary
+    if (rows[0].image_public_id) {
+      await cloudinary.uploader.destroy(rows[0].image_public_id).catch(() => {});
     }
 
-    await product.deleteOne();
     res.json({ success: true, message: 'Product deleted' });
   } catch (err) {
-    console.error('DELETE /admin/products/:id error:', err);
+    console.error('DELETE /admin/products/:id error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// Toggle product stock status
+// Toggle stock status
 router.patch('/products/:id/stock', async (req, res) => {
   try {
     const { inStock } = req.body;
 
-    if (typeof inStock !== 'boolean' && inStock !== 'true' && inStock !== 'false') {
-      return res.status(400).json({ success: false, message: 'inStock must be a boolean' });
+    if (inStock === undefined) {
+      return res.status(400).json({ success: false, message: 'inStock is required' });
     }
 
-    const product = await Product.findByIdAndUpdate(
-      req.params.id,
-      { $set: { inStock: inStock === true || inStock === 'true' } },
-      { new: true }
+    const value = inStock === true || inStock === 'true';
+    const { rows } = await pool.query(
+      'UPDATE products SET in_stock = $1 WHERE id = $2 RETURNING *',
+      [value, req.params.id]
     );
 
-    if (!product) {
+    if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Product not found' });
     }
-    res.json({ success: true, product });
+    res.json({ success: true, product: rows[0] });
   } catch (err) {
-    console.error('PATCH /admin/products/:id/stock error:', err);
+    console.error('PATCH /admin/products/:id/stock error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -180,25 +203,38 @@ router.patch('/products/:id/stock', async (req, res) => {
 router.get('/orders', async (req, res) => {
   try {
     const { status } = req.query;
-    const filter = status ? { paymentStatus: status } : {};
-    const orders = await Order.find(filter).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, orders });
+    const values = [];
+    let where = '';
+
+    if (status) {
+      values.push(status);
+      where = `WHERE payment_status = $1`;
+    }
+
+    const { rows } = await pool.query(
+      `SELECT * FROM orders ${where} ORDER BY created_at DESC`,
+      values
+    );
+    res.json({ success: true, orders: rows });
   } catch (err) {
-    console.error(err);
+    console.error(err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// Single order detail
+// Single order
 router.get('/orders/:id', async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).lean();
-    if (!order) {
+    const { rows } = await pool.query(
+      'SELECT * FROM orders WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
-    res.json({ success: true, order });
+    res.json({ success: true, order: rows[0] });
   } catch (err) {
-    console.error(err);
+    console.error(err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

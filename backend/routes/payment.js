@@ -10,14 +10,9 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const axios = require('axios');
-const Order = require('../models/Order');
-
-/* ═══════════════════════════════════════════════════════════
-   PAYSTACK
-═══════════════════════════════════════════════════════════ */
+const pool = require('../config/db');
 
 // Initialize a Paystack transaction
-// Body: { customer: { name, email, phone }, items: [...], currency: 'NGN' }
 router.post('/paystack/initialize', async (req, res) => {
   try {
     const { customer, items, currency = 'NGN', deliveryNote = '' } = req.body;
@@ -28,20 +23,28 @@ router.post('/paystack/initialize', async (req, res) => {
 
     const totalNGN = items.reduce((sum, item) => sum + item.price * item.qty, 0);
     const amountKobo = Math.round(totalNGN * 100);
-
     const reference = `EB-PS-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
-    await Order.create({
-      reference,
-      customer,
-      items,
-      totalAmount: amountKobo,
-      currency,
-      paymentMethod: 'paystack',
-      paystackReference: reference,
-      deliveryNote,
-    });
+    // Save pending order
+    await pool.query(
+      `INSERT INTO orders
+         (reference, customer_name, customer_email, customer_phone,
+          items, total_amount, currency, payment_method, paystack_reference, delivery_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'paystack',$8,$9)`,
+      [
+        reference,
+        customer.name,
+        customer.email,
+        customer.phone || '',
+        JSON.stringify(items),
+        amountKobo,
+        currency,
+        reference,
+        deliveryNote,
+      ]
+    );
 
+    // Initialize with Paystack
     const response = await axios.post(
       'https://api.paystack.co/transaction/initialize',
       {
@@ -83,7 +86,7 @@ router.post('/paystack/initialize', async (req, res) => {
   }
 });
 
-// Paystack redirect callback — Paystack sends customer here after payment
+// Paystack redirect callback
 router.get('/paystack/callback', async (req, res) => {
   const { reference } = req.query;
 
@@ -100,29 +103,29 @@ router.get('/paystack/callback', async (req, res) => {
     const data = response.data.data;
 
     if (data.status === 'success') {
-      await Order.findOneAndUpdate(
-        { paystackReference: reference },
-        { $set: { paymentStatus: 'paid' } }
+      await pool.query(
+        `UPDATE orders SET payment_status = 'paid' WHERE paystack_reference = $1`,
+        [reference]
       );
       return res.redirect(
         `${process.env.FRONTEND_URL}/payment/success?reference=${reference}&method=paystack`
       );
     }
 
-    await Order.findOneAndUpdate(
-      { paystackReference: reference },
-      { $set: { paymentStatus: 'failed' } }
+    await pool.query(
+      `UPDATE orders SET payment_status = 'failed' WHERE paystack_reference = $1`,
+      [reference]
     );
     return res.redirect(
-      `${process.env.FRONTEND_URL}/payment/failed?reference=${reference}&reason=${data.gateway_response}`
+      `${process.env.FRONTEND_URL}/payment/failed?reference=${reference}&reason=${encodeURIComponent(data.gateway_response)}`
     );
   } catch (err) {
-    console.error('Paystack callback verify error:', err.response?.data || err.message);
+    console.error('Paystack callback error:', err.response?.data || err.message);
     return res.redirect(`${process.env.FRONTEND_URL}/payment/failed?reason=verification_error`);
   }
 });
 
-// Paystack webhook — set this URL in Paystack dashboard → Settings → Webhooks
+// Paystack webhook
 router.post('/paystack/webhook', async (req, res) => {
   const hash = crypto
     .createHmac('sha512', process.env.PAYSTACK_WEBHOOK_SECRET)
@@ -137,34 +140,31 @@ router.post('/paystack/webhook', async (req, res) => {
 
   try {
     if (event === 'charge.success') {
-      await Order.findOneAndUpdate(
-        { paystackReference: data.reference },
-        { $set: { paymentStatus: 'paid' } }
+      await pool.query(
+        `UPDATE orders SET payment_status = 'paid' WHERE paystack_reference = $1`,
+        [data.reference]
       );
     }
-
     if (event === 'charge.failed') {
-      await Order.findOneAndUpdate(
-        { paystackReference: data.reference },
-        { $set: { paymentStatus: 'failed' } }
+      await pool.query(
+        `UPDATE orders SET payment_status = 'failed' WHERE paystack_reference = $1`,
+        [data.reference]
       );
     }
-
     res.sendStatus(200);
   } catch (err) {
-    console.error('Paystack webhook error:', err);
+    console.error('Paystack webhook error:', err.message);
     res.sendStatus(500);
   }
 });
 
-// Manual verification endpoint
+// Manual verify
 router.get('/paystack/verify/:reference', async (req, res) => {
   try {
     const response = await axios.get(
       `https://api.paystack.co/transaction/verify/${req.params.reference}`,
       { headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` } }
     );
-
     const data = response.data.data;
     res.json({
       success: true,

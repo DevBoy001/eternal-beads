@@ -1,7 +1,7 @@
 {
   "name": "eternal-beads-backend",
   "version": "1.0.0",
-  "description": "Eternal Beads API — Paystack, PayPal, Cloudinary, Admin",
+  "description": "Eternal Beads API — Paystack, Cloudinary, Neon PostgreSQL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,9 +15,9 @@
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
-    "mongoose": "^8.14.2",
     "multer": "^1.4.5-lts.2",
-    "multer-storage-cloudinary": "^4.0.0"
+    "multer-storage-cloudinary": "^4.0.0",
+    "pg": "^8.14.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
